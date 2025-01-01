@@ -40,6 +40,55 @@ object Main {
         rdd.saveAsTextFile(hdfsPath)
       }
     })
+    kafkaStream.foreachRDD { rdd =>
+  if (!rdd.isEmpty()) {
+    val kafkaDF = rdd.map(record => record.value).toDF("value")
+
+    // Define the schema for JSON data
+    val schema = StructType(Array(
+      StructField("event_time", TimestampType, true),
+      StructField("event_type", StringType, true),
+      StructField("product_id", StringType, true),
+      StructField("category_id", StringType, true),
+      StructField("category_code", StringType, true),
+      StructField("brand", StringType, true),
+      StructField("price", DoubleType, true),
+      StructField("user_id", StringType, true),
+      StructField("user_session", StringType, true)
+    ))
+
+    // Parse the JSON data
+    val parsedDF = kafkaDF
+      .select(from_json($"value".cast("string"), schema).alias("data"))
+      .select("data.*")
+      
+    // Write to HDFS as partitioned Parquet
+    val hdfsPath = "hdfs://namenode:8020/intra-network/parquet_output"
+    parsedDF.write
+      .mode("append")
+      .partitionBy("event_time")
+      .parquet(hdfsPath)
+
+    // Read back the newly written data
+    val newlyWrittenDF = spark.read.parquet(hdfsPath)
+
+    // Read the existing "master" file
+    val masterFilePath = "hdfs://namenode:8020/raw/all.parquet"
+    val masterDF = try {
+      spark.read.parquet(masterFilePath)
+    } catch {
+      case _: Throwable => spark.emptyDataFrame // If the master file doesn't exist, start with empty DataFrame
+    }
+
+    // Append the new data to the master file
+    val updatedMasterDF = masterDF.union(newlyWrittenDF)
+
+    // Write back the combined data to the master file
+    updatedMasterDF.write
+      .mode("overwrite")
+      .parquet(masterFilePath)
+  }
+}
 
 
     streamingContext.start()
